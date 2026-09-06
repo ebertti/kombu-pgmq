@@ -67,11 +67,12 @@ podman run --rm --network kombu-pgmq_default kombu-pgmq-smoketest
 ## CI/CD
 
 - `.github/workflows/ci.yml`: on every PR into `main`, runs `ruff check`/`ruff format --check` and the default `pytest` suite (Postgres+pgmq via `docker compose up -d --wait postgres`; perf tests excluded, same as local) across a Python 3.10–3.14 matrix (`requires-python`'s floor is 3.10, matching `psycopg`/`pgmq`'s own `requires_python`).
-- `.github/workflows/release.yml`: publishes to PyPI on push of a `vX.Y.Z` tag. Verifies the tag matches `pyproject.toml`'s `version` before building. Uses PyPI Trusted Publishing (OIDC, `uv publish`) — no secrets, but requires a one-time setup on pypi.org (project's "Publishing" settings → add this repo/workflow/`pypi` environment as a trusted publisher) before the first release. To release: bump `version` in `pyproject.toml`, then `git tag vX.Y.Z && git push --tags`.
+- `.github/workflows/release.yml`: publishes to PyPI on push of a `vX.Y.Z` tag. Verifies the tag matches `pyproject.toml`'s `version` before building. Uses PyPI Trusted Publishing (OIDC, `uv publish`) — no secrets needed, but the trusted publisher must be configured on pypi.org first: project **Settings → Publishing** at `pypi.org/manage/project/kombu-pgmq/settings/publishing/` (not the account-level "pending publisher" page — that's only for projects that don't exist yet, and it's what failed the first time around here). Fields must match exactly: owner `ebertti`, repository `kombu-pgmq`, workflow filename `release.yml` (not the full path, not `.yaml`), environment `pypi`.
+- `0.1.0` was published manually (`uv build` + `uvx twine upload dist/*` with a local `~/.pypirc` token) because trusted publishing rejected the OIDC token on the first two attempts — the configured workflow filename didn't match `release.yml` exactly. Once that's fixed and verified, `git tag vX.Y.Z && git push --tags` (after bumping `version` in `pyproject.toml`) is enough for every release after this one.
 
 ## References
 
 - [Kombu virtual transport](https://github.com/celery/kombu/blob/main/kombu/transport/virtual/base.py)
 - [Kombu SQS transport](https://github.com/celery/kombu/blob/main/kombu/transport/SQS/__init__.py) — closest reference implementation (vt/receipt-handle semantics)
 - [PGMQ](https://github.com/pgmq/pgmq) / [PGMQ Python client](https://github.com/pgmq/pgmq-py)
-- `plan/inicial.md` — initial project rationale
+- [kombu-pgmq on PyPI](https://pypi.org/project/kombu-pgmq/)
