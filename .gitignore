@@ -12,3 +12,6 @@ wheels/
 # IDE / OS
 .idea/
 .DS_Store
+
+# Claude Code local settings
+.claude/
