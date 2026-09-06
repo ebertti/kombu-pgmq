@@ -1,7 +1,65 @@
 [project]
 name = "kombu-pgmq"
 version = "0.1.0"
-description = "Add your description here"
+description = "Kombu transport for PGMQ — use PostgreSQL as the Celery broker, without Redis or RabbitMQ"
 readme = "README.md"
-requires-python = ">=3.14"
-dependencies = []
+license = "MIT"
+requires-python = ">=3.10"
+keywords = ["celery", "kombu", "postgresql", "pgmq", "queue", "broker"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Framework :: Celery",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Database",
+    "Topic :: System :: Distributed Computing",
+]
+dependencies = [
+    "kombu>=5.3",
+]
+
+[project.urls]
+Homepage = "https://github.com/ebertti/kombu-pgmq"
+Repository = "https://github.com/ebertti/kombu-pgmq"
+Issues = "https://github.com/ebertti/kombu-pgmq/issues"
+
+[project.optional-dependencies]
+psycopg = ["psycopg[binary,pool]>=3"]
+pgmq = ["pgmq>=1.1.3"]
+all = ["kombu-pgmq[psycopg,pgmq]"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "celery>=5.3",
+    "psycopg[binary,pool]>=3",
+    "pgmq>=1.1.3",
+    "redis>=5",
+    "ruff>=0.8",
+]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
+[tool.pytest.ini_options]
+addopts = "-m 'not perf'"
+markers = [
+    "perf: performance comparison between backends, excluded by default (run with -m perf)",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/kombu_pgmq"]

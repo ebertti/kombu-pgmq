@@ -14,3 +14,14 @@ services:
       interval: 2s
       timeout: 2s
       retries: 15
+
+  # Only needed for tests/test_performance_brokers.py (broker comparison benchmark).
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  rabbitmq:
+    image: rabbitmq:3-alpine
+    ports:
+      - "5672:5672"

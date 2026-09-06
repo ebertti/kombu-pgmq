@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(*)",
+      "Bash(*)",
+      "Read",
+      "Write",
+      "Edit",
+      "Bash(python3 -c ' *)",
+      "WebFetch(*)"
+    ]
+  }
+}

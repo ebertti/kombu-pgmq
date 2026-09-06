@@ -24,11 +24,13 @@ kombu-pgmq/
 ├── src/
 │   └── kombu_pgmq/
 │       ├── __init__.py
-│       ├── transport.py
-│       └── connection.py
+│       └── transport.py    # Channel (base) + ChannelPGMQ/ChannelPsycopg + TransportPGMQ/TransportPsycopg
 └── tests/
     ├── test_transport.py
-    └── test_celery_integration.py
+    ├── test_celery_integration.py
+    ├── test_performance.py
+    ├── test_performance_concurrency.py
+    └── test_performance_brokers.py
 ```
 
 ## MVP scope
@@ -53,9 +55,13 @@ Out of scope for now (do not implement without an explicit request):
 
 - Use `kombu.transport.virtual` as the base — do not reimplement full AMQP.
 - **Do not delete the message in `_get()`**: read → keep it invisible via VT → delete only on ACK.
-- Store `msg_id` in the message body for the later ACK (`_pgmq_msg_id`).
-- Use `psycopg` directly (not the official PGMQ Python client) to control pooling and avoid an extra dependency — revisable decision.
-- Broker URL: `pgmq://user:pass@host:5432/db` or `broker_transport = "kombu_pgmq.transport:Transport"` + `broker_url = "postgresql://..."`.
+- Store `msg_id` in `properties.delivery_info["pgmq_msg_id"]` for the later ACK — not in the message body, so the task payload the worker sees stays untouched (same pattern `kombu.transport.SQS` uses for the receipt handle).
+- Two concrete Transport/Channel classes, not one Transport with a `backend` option: `TransportPGMQ`/`ChannelPGMQ` (default, official `pgmq` client, `pip install kombu-pgmq[pgmq]`) and `TransportPsycopg`/`ChannelPsycopg` (raw SQL, `pip install kombu-pgmq[psycopg]`). Both subclass a shared `Channel` base in `transport.py` that implements all the Kombu-facing plumbing (`_new_queue`, `_get`, `basic_ack`, etc.) in terms of primitives (`_send`, `_read`, `_delete_message`, ...) each subclass implements. No separate `backends/` package/abstraction — deliberately merged into `transport.py` after that indirection stopped pulling its weight. Neither PGMQ lib is a base dependency — each subclass's lazy `cached_property` guards its import and raises a clear `ImportError` naming the extra to install if picked without it. `kombu-pgmq[all]` installs both; `Transport` is exported as an alias for `TransportPGMQ`.
+- Broker URL: `pgmq://user:pass@host:5432/db` (via `TRANSPORT_ALIASES`, always resolves to `TransportPGMQ`, requires `import kombu_pgmq` first) or `broker_transport = "kombu_pgmq.transport:TransportPGMQ"` / `"...:TransportPsycopg"` + `broker_url = "postgresql://..."`.
+- Both channels accept `pool: bool` (via `transport_options["pool"]`), defaulting to `True` for both. `tests/test_performance.py` (marked `perf`, excluded by default) showed no-pool consistently faster than pooled for both under sequential single-worker access; `tests/test_performance_concurrency.py` (N threads sharing one `Channel`) found pooling starts winning consistently around ~4 concurrent threads for both. Default is `True` (the safer choice when the caller doesn't control how many threads share a `Channel`) — see README's "Connection pooling" section for the numbers and when to flip it to `False`.
+- `tests/test_performance_brokers.py` runs the same send/read+ack loop against Redis and RabbitMQ via Kombu's own built-in transports (`docker-compose.yml`'s `redis`/`rabbitmq` services, only needed for this file). Both are 3–20x faster than either kombu-pgmq channel — expected, they're purpose-built brokers. PGMQ's value proposition is "one less moving part, transactional guarantees with the rest of your Postgres data", not raw throughput — see README's "How does it compare to Redis / RabbitMQ?" section.
+- `kombu-pgmq[pgmq]` already installs `psycopg` transitively (the official `pgmq` client depends on `psycopg[binary,pool]` itself), so `psycopg` presence isn't the differentiator between the two extras. `[psycopg]` *is* the lighter-weight, more decoupled option though: it skips the `pgmq`/`orjson` dependencies and the official client's own API surface/quirks entirely — `[pgmq]` trades that for built-in pooling and upstream-tracked SQL.
+- `requires-python = ">=3.10"` — checked directly against PyPI (`requires_python` on each package's JSON metadata) rather than guessing: `psycopg`/`psycopg-binary`/`psycopg-pool`/`pgmq` all require `>=3.10` (the tightest constraint in the dependency tree; `kombu`/`celery` only need `>=3.9`). Nothing in our own code needs newer than 3.10 either (only `X | None` return annotations, PEP 604, itself a 3.10 feature). Verified empirically too, not just by metadata: ran the full suite against a real Python 3.10 venv (`uv venv --python 3.10`) before trusting it. CI (`ci.yml`) runs the test matrix across 3.10–3.14 on every PR.
 
 ## Engineering Principles
 

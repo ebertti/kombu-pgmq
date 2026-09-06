@@ -1,0 +1,59 @@
+name: "Publish release to PyPI"
+
+on:
+  push:
+    tags:
+      # Publish on version tags, e.g. v0.1.0
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Verify tag matches pyproject.toml version
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          PROJECT_VERSION="$(grep -m1 '^version' pyproject.toml | sed -E 's/version = "(.*)"/\1/')"
+          if [ "$TAG_VERSION" != "$PROJECT_VERSION" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match pyproject.toml version $PROJECT_VERSION" >&2
+            exit 1
+          fi
+
+      - name: Build
+        run: uv build
+
+      - name: Upload distributions as artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: [build]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+    permissions:
+      id-token: write
+    steps:
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Download distributions artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish
+        run: uv publish
