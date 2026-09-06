@@ -38,6 +38,33 @@ def queue_name():
 
 
 @pytest.fixture
+def exchange_name():
+    return f"test_exchange_{uuid.uuid4().hex[:12]}"
+
+
+@pytest.fixture
+def make_queue_name():
+    created = []
+
+    def _make():
+        name = f"test_{uuid.uuid4().hex[:12]}"
+        created.append(name)
+        return name
+
+    yield _make
+
+    conn = psycopg.connect(DSN, autocommit=True)
+    try:
+        for name in created:
+            try:
+                conn.execute("SELECT pgmq.drop_queue(%s)", (name,))
+            except Exception:
+                pass
+    finally:
+        conn.close()
+
+
+@pytest.fixture
 def connection(backend_name):
     conn = Connection(
         transport=TRANSPORTS[backend_name],

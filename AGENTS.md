@@ -23,7 +23,7 @@ Turn the task into a verifiable criterion (e.g., "fix the bug" → "write a test
 
 ## What not to do
 
-- Do not implement fanout, topic exchange, priority, or celery events — out of MVP scope.
+- Do not implement `priority` — out of scope (see CLAUDE.md for why it doesn't map cleanly onto PGMQ). Fanout/topic exchange, remote control and celery events are implemented — see `transport.py`'s bindings table + `_pgmq_name`.
 - Do not delete messages in `_get()` — deletion only happens on ACK (`pgmq.delete(msg_id)`).
 - Do not add dependencies without explicit approval from the author.
 - Do not refactor adjacent code that wasn't touched by the task.
@@ -34,7 +34,9 @@ Turn the task into a verifiable criterion (e.g., "fix the bug" → "write a test
 ```
 publish  → pgmq.send(queue, payload)
 receive  → pgmq.read(queue, vt=visibility_timeout, qty=1)
-           └── msg_id stored in message["properties"]["delivery_info"]["pgmq_msg_id"]
+           └── msg_id and the actual PGMQ queue name stored in
+               message["properties"]["delivery_info"]["pgmq_msg_id"] / ["pgmq_queue"]
+               (queue can differ from routing_key for fanout/topic exchanges)
 ack      → pgmq.delete(queue, msg_id)
 reject (requeue=False) → pgmq.delete(queue, msg_id)
 reject (requeue=True)  → no delete; VT expires and the message reappears

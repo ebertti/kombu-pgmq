@@ -1,6 +1,6 @@
 [project]
 name = "kombu-pgmq"
-version = "0.1.0"
+version = "0.2.0"
 description = "Kombu transport for PGMQ — use PostgreSQL as the Celery broker, without Redis or RabbitMQ"
 readme = "README.md"
 license = "MIT"

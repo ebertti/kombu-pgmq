@@ -23,6 +23,63 @@ Both ultimately run on `psycopg` 3 — `kombu-pgmq[pgmq]` already installs it to
 
 `kombu-pgmq[all]` installs both — useful if you want to pick the backend at runtime (via `transport_options`) without reinstalling, which is exactly why this project's own test suite uses it.
 
+## PostgreSQL setup
+
+`kombu-pgmq` requires the [`pgmq` extension](https://github.com/tembo-io/pgmq) to be installed in your PostgreSQL database. It does not install or enable the extension automatically — this must be done once by a superuser:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS pgmq;
+```
+
+If the extension is not present when the first connection is made, `kombu-pgmq` raises a `RuntimeError` with a clear message. To disable this check (e.g. if the extension is managed externally or your provider blocks `pg_extension` reads), set:
+
+```python
+app.conf.broker_transport_options = {
+    "check_extension": False,
+}
+```
+
+### Provider compatibility
+
+The `pgmq` extension is not bundled with standard PostgreSQL — it must be installed separately, and not all managed providers allow it.
+
+| Provider                            | PGMQ | Notes                                                                                                                           |
+|-------------------------------------|:----:|---------------------------------------------------------------------------------------------------------------------------------|
+| **Self-hosted / Docker**            |  ✅  | Use the [`ghcr.io/pgmq/pg18-pgmq:v1.10.0`](ghcr.io/pgmq/pg18-pgmq:v1.10.0) image (this repo's `docker-compose.yml`)             |
+| **Supabase**                        |  ✅  | Available — run `CREATE EXTENSION pgmq;` once                                                                                   |
+| **Neon**                            |  ✅  | Available — run `CREATE EXTENSION pgmq;` once                                                                                   |
+| **Tembo Cloud**                     |  ✅  | Available — run `CREATE EXTENSION pgmq;` or enable via the dashboard                                                            |
+| **AWS RDS**                         |  ❌  | Not in the [RDS supported extensions list](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/CHAP_PostgreSQL.html)         |
+| **AWS Aurora**                      |  ❌  | Same as RDS                                                                                                                     |
+| **Google Cloud SQL**                |  ❌  | Not in the [Cloud SQL extensions list](https://cloud.google.com/sql/docs/postgres/extensions)                                   |
+| **Azure Database for PostgreSQL**   |  ❌  | Not in the [Azure supported extensions](https://learn.microsoft.com/en-us/azure/postgresql/flexible-server/concepts-extensions) |
+| **DigitalOcean Managed PostgreSQL** |  ❌  | Not in the managed extension list                                                                                               |
+| **Aiven**                           |  ❌  | Not in the [Aiven extension list](https://aiven.io/docs/products/postgresql/reference/list-of-extensions)                       |
+| **Render Managed PostgreSQL**       |  ❌  | Custom extensions not supported                                                                                                 |
+
+> If your provider is not supported, options are: (1) run your own PostgreSQL on a VM/container with the extension installed, or (2) use Supabase or Neon as a compatible managed alternative.
+
+### Self-hosted / Docker
+
+The quickest way to get a PGMQ-enabled Postgres running locally is with the pre-built Docker image from Tembo:
+
+```bash
+docker run -d \
+  --name pgmq \
+  -e POSTGRES_PASSWORD=postgres \
+  -p 5432:5432 \
+  temboio/pg16-pgmq:latest
+```
+
+Then enable the extension once:
+
+```bash
+psql postgresql://postgres:postgres@localhost:5432/postgres \
+  -c "CREATE EXTENSION IF NOT EXISTS pgmq;"
+```
+
+This repo's `docker-compose.yml` already does both steps — `docker compose up -d` is enough for local development.
+
 ## Usage
 
 ```python
@@ -41,6 +98,15 @@ app.conf.broker_transport_options = {
 ```
 
 `kombu_pgmq.transport:Transport` is also exported as an alias for `TransportPGMQ`, and the `pgmq://` broker URL scheme (registered on `import kombu_pgmq`) always resolves to `TransportPGMQ` too — use `broker_transport` explicitly to pick `TransportPsycopg`.
+
+### Fanout, topic exchanges, and remote control
+
+Both transports support `direct`, `topic` and `fanout` exchanges, backed by a small bindings table (`kombu_pgmq_bindings`, created automatically on first use) instead of Kombu's default in-memory-only bindings — which is what actually makes this work across separate worker processes, not just within one. `celery inspect`/`celery control` (pidbox) and `celery events` both ride on top of this (they're plain fanout/topic exchanges under the hood) and need no special configuration.
+
+Two things worth knowing:
+
+- PGMQ caps queue names at 47 characters. Celery generates longer auto-named queues for things like pidbox replies (`<uuid>.reply.celery.pidbox`); `kombu-pgmq` shortens any queue name over the limit deterministically (same input always maps to the same shortened PGMQ queue) before it reaches PGMQ — transparent, nothing to configure.
+- Unbinding a queue from an exchange without deleting the queue itself (`queue_unbind`) isn't reliable against a persisted bindings table — the same limitation exists in Kombu's own Redis transport. In practice this doesn't come up: pidbox/events/normal usage always bind once and later drop the whole queue, never unbind-in-place.
 
 ### Connection pooling
 

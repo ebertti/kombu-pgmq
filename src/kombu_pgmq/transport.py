@@ -1,3 +1,4 @@
+import hashlib
 from queue import Empty
 
 from kombu.transport import virtual
@@ -15,6 +16,20 @@ try:
 except ImportError:
     PGMQueue = None
 
+#: PGMQ caps queue names at 47 characters. Celery's pidbox/events generate
+#: longer auto-named queues (e.g. `<uuid>.reply.celery.pidbox`), so long
+#: names are deterministically shortened before ever reaching PGMQ. Only
+#: applied at the PGMQ call boundary — the Kombu-facing queue name (bindings
+#: table, delivery_info, etc.) is always the original, untruncated one.
+PGMQ_MAX_QUEUE_NAME_LENGTH = 47
+
+
+def _pgmq_name(queue):
+    if len(queue) <= PGMQ_MAX_QUEUE_NAME_LENGTH:
+        return queue
+    digest = hashlib.sha1(queue.encode()).hexdigest()[:8]
+    return f"{queue[:38]}_{digest}"
+
 
 class Channel(virtual.Channel):
     """Kombu <-> PGMQ plumbing shared by both concrete channels below.
@@ -26,11 +41,20 @@ class Channel(virtual.Channel):
     """
 
     visibility_timeout = 30
+    check_extension = True
 
     from_transport_options = virtual.Channel.from_transport_options + (
         "visibility_timeout",
         "pool",
+        "check_extension",
     )
+
+    # Exchange/queue bindings must be persisted (not just kept in the
+    # in-process `self.state` the base class defaults to) so that fanout and
+    # topic routing work across separate worker processes. This flag makes
+    # the base `queue_bind()` call our `_queue_bind()` for every exchange
+    # type, not just fanout — same approach kombu's own Redis transport uses.
+    supports_fanout = True
 
     @cached_property
     def _dsn(self):
@@ -42,47 +66,109 @@ class Channel(virtual.Channel):
             f"{dbname}"
         )
 
+    @cached_property
+    def _bindings_conn(self):
+        import psycopg
+
+        conn = psycopg.connect(self._dsn, autocommit=True)
+        if self.check_extension:
+            row = conn.execute("SELECT 1 FROM pg_extension WHERE extname = 'pgmq'").fetchone()
+            if row is None:
+                raise RuntimeError(
+                    "The 'pgmq' PostgreSQL extension is not installed in this database. "
+                    "Run: CREATE EXTENSION IF NOT EXISTS pgmq; "
+                    "See the README for provider-specific instructions. "
+                    "To skip this check: transport_options={'check_extension': False}."
+                )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS kombu_pgmq_bindings (
+                exchange text NOT NULL,
+                routing_key text NOT NULL DEFAULT '',
+                pattern text NOT NULL DEFAULT '',
+                queue text NOT NULL,
+                PRIMARY KEY (exchange, routing_key, queue)
+            )
+            """
+        )
+        return conn
+
+    def _queue_bind(self, exchange, routing_key, pattern, queue):
+        self._bindings_conn.execute(
+            """
+            INSERT INTO kombu_pgmq_bindings (exchange, routing_key, pattern, queue)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (exchange, routing_key, queue) DO NOTHING
+            """,
+            (exchange, routing_key or "", pattern or "", queue),
+        )
+
+    def get_table(self, exchange):
+        rows = self._bindings_conn.execute(
+            "SELECT routing_key, pattern, queue FROM kombu_pgmq_bindings WHERE exchange = %s",
+            (exchange,),
+        ).fetchall()
+        return [tuple(row) for row in rows]
+
+    def _put_fanout(self, exchange, message, routing_key, **kwargs):
+        for _, _, queue in self.get_table(exchange):
+            self._send(_pgmq_name(queue), message)
+
     def _new_queue(self, queue, **kwargs):
+        queue = _pgmq_name(queue)
         if not self._queue_exists(queue):
             self._create_queue(queue)
 
     def _has_queue(self, queue, **kwargs):
-        return self._queue_exists(queue)
+        return self._queue_exists(_pgmq_name(queue))
 
     def _put(self, queue, message, **kwargs):
-        self._send(queue, message)
+        self._send(_pgmq_name(queue), message)
 
     def _get(self, queue, timeout=None):
-        result = self._read(queue, self.visibility_timeout)
+        pgmq_queue = _pgmq_name(queue)
+        result = self._read(pgmq_queue, self.visibility_timeout)
         if result is None:
             raise Empty()
         msg_id, envelope = result
         envelope["properties"]["delivery_info"]["pgmq_msg_id"] = msg_id
+        # The actual PGMQ queue a message came from, needed for ack/reject.
+        # Not always equal to `routing_key` (e.g. fanout/topic exchanges,
+        # where the routing key differs from the bound queue name), and
+        # already shortened to fit PGMQ's 47-char limit.
+        envelope["properties"]["delivery_info"]["pgmq_queue"] = pgmq_queue
         return envelope
 
     def _purge(self, queue):
-        return self._purge_queue(queue)
+        return self._purge_queue(_pgmq_name(queue))
 
-    def _delete(self, queue, *args, **kwargs):
-        self._drop_queue(queue)
+    def _delete(self, queue, exchange=None, routing_key=None, pattern=None, *args, **kwargs):
+        if exchange is not None:
+            self._bindings_conn.execute(
+                "DELETE FROM kombu_pgmq_bindings WHERE exchange = %s AND queue = %s",
+                (exchange, queue),
+            )
+        self._drop_queue(_pgmq_name(queue))
 
     def _size(self, queue):
-        return self._queue_size(queue)
+        return self._queue_size(_pgmq_name(queue))
 
     def basic_ack(self, delivery_tag, multiple=False):
         info = self.qos.get(delivery_tag).delivery_info
-        self._delete_message(info["routing_key"], info["pgmq_msg_id"])
+        self._delete_message(info["pgmq_queue"], info["pgmq_msg_id"])
         super().basic_ack(delivery_tag, multiple=multiple)
 
     def basic_reject(self, delivery_tag, requeue=False):
         if not requeue:
             info = self.qos.get(delivery_tag).delivery_info
-            self._delete_message(info["routing_key"], info["pgmq_msg_id"])
+            self._delete_message(info["pgmq_queue"], info["pgmq_msg_id"])
         # Never let the base class re-`_put` the message (would duplicate it
         # in PGMQ): requeue is handled natively by the visibility timeout.
         self.qos.reject(delivery_tag, requeue=False)
 
     def close(self):
+        if "_bindings_conn" in self.__dict__:
+            self._bindings_conn.close()
         self._close_conn()
         super().close()
 
@@ -229,6 +315,9 @@ class TransportPsycopg(virtual.Transport):
     driver_name = "pgmq-psycopg"
     default_port = 5432
     polling_interval = 1.0
+    implements = virtual.Transport.implements.extend(
+        exchange_type=frozenset(["direct", "topic", "fanout"]),
+    )
 
 
 class TransportPGMQ(virtual.Transport):
@@ -238,6 +327,9 @@ class TransportPGMQ(virtual.Transport):
     driver_name = "pgmq"
     default_port = 5432
     polling_interval = 1.0
+    implements = virtual.Transport.implements.extend(
+        exchange_type=frozenset(["direct", "topic", "fanout"]),
+    )
 
 
 # Default/backwards-compatible alias: `broker_transport = "kombu_pgmq.transport:Transport"`.
